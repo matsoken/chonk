@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Derive version from tag
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}" -replace '^v',''
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "version: $v"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go build -trimpath -ldflags "-s -w -X main.version=$env:VERSION" -o dist\chonk.exe .\cmd\chonk
+
+      - name: Verify the binary reports the tagged version
+        shell: pwsh
+        run: |
+          $got = (& .\dist\chonk.exe -version).Trim()
+          $want = "chonk $env:VERSION"
+          if ($got -ne $want) { throw "binary reports '$got', expected '$want'" }
+          Write-Host $got
+
+      # Inno Setup ships on the windows-2022 image but NOT on windows-2025, which
+      # is what windows-latest now resolves to. See actions/runner-images#12947.
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          # Chocolatey, the runner image and winget each drop Inno in a different
+          # place, so resolve rather than hardcode.
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found in: $($candidates -join ', ')" }
+          Write-Host "using $iscc"
+          & $iscc "/DAppVersion=$env:VERSION" packaging\chonk.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+
+      - name: Checksums
+        shell: pwsh
+        working-directory: dist
+        run: |
+          Get-ChildItem -Filter *setup.exe | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Set-Content -Path checksums.txt -Encoding ascii
+          Get-Content checksums.txt
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            (Get-ChildItem dist\*setup.exe, dist\checksums.txt | ForEach-Object FullName) `
+            --title "${{ github.ref_name }}" `
+            --generate-notes

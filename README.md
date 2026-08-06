@@ -1,5 +1,7 @@
 # chonk
 
+[![ci](https://github.com/matsoken/chonk/actions/workflows/ci.yml/badge.svg)](https://github.com/matsoken/chonk/actions/workflows/ci.yml)
+
 A fast disk usage tool for Windows. No admin prompt, no GUI, works on network
 shares and USB sticks.
 
@@ -32,6 +34,22 @@ NTFS change journal instead of the disk:
 ```
 
 `chonk --tui C:\` opens an interactive drill-down over the same tree.
+
+## Install
+
+Download the setup .exe from [Releases](https://github.com/matsoken/chonk/releases)
+and run it. It installs to `%LOCALAPPDATA%\Programs\chonk`, adds that to your user
+PATH, and never asks for admin — same as the tool itself. Uninstall from Settings →
+Apps.
+
+Or, with a Go toolchain:
+
+```
+go install github.com/matsoken/chonk/cmd/chonk@latest
+```
+
+winget support is [pending review](https://github.com/microsoft/winget-pkgs) in the
+community repository; once it merges, `winget install matsoken.chonk`.
 
 ## Measured on a 458 GB volume
 
@@ -202,3 +220,7 @@ ordering invariant.
 Treemaps (needs a real GUI), deleting or moving files (read-only, reporting
 only), and cross-platform support (`//go:build windows` throughout; `gdu`
 already covers Linux).
+
+## License
+
+[MIT](LICENSE).

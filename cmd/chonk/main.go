@@ -16,7 +16,10 @@ import (
 	"github.com/matsoken/chonk/internal/tui"
 )
 
-const version = "0.1.0"
+// version is stamped by the linker at release time; see
+// .github/workflows/release.yml. An untagged local build reports "dev" rather
+// than claiming a release number it is not.
+var version = "dev"
 
 func main() {
 	var (

@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Not a preference. Every file is //go:build windows, so a Linux runner
+    # compiles zero packages and reports success without testing anything.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        shell: pwsh
+        run: |
+          $bad = gofmt -l .
+          if ($bad) {
+            Write-Host "::error::gofmt needed on:`n$bad"
+            exit 1
+          }
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        # No -race: it needs a C toolchain. TestDeterministicAcrossWorkerCounts
+        # runs the same tree at 1/2/3/8/32 workers and demands identical totals,
+        # which is what stands in for the race detector here.
+        run: go test ./...
+
+      - name: build
+        run: go build ./...

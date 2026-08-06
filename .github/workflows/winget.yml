@@ -1,0 +1,43 @@
+name: winget
+
+# Opens a PR against microsoft/winget-pkgs whenever a release is published.
+#
+# This only works from the SECOND release onward. The action derives new
+# manifests from the package's previous version, so v0.1.0 has to be submitted
+# by hand first (wingetcreate new) and merged by a winget-pkgs moderator.
+#
+# Requires, neither of which can be created from CI:
+#   - a fork of microsoft/winget-pkgs under the matsoken account
+#   - repo secret WINGET_PAT: a *classic* PAT with public_repo scope.
+#     Fine-grained PATs are not supported by the action, and GITHUB_TOKEN
+#     cannot reach another repository.
+#
+# Until the secret exists this job is skipped rather than failing the release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for PAT
+        id: gate
+        env:
+          PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "WINGET_PAT not set — skipping winget submission."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: vedantmgoyal9/winget-releaser@v2
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          identifier: matsoken.chonk
+          installers-regex: '-setup\.exe$'
+          token: ${{ secrets.WINGET_PAT }}
