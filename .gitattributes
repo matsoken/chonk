@@ -1,0 +1,8 @@
+# Windows runners check out with core.autocrlf=true by default, which rewrites
+# every file to CRLF and makes `gofmt -l` flag the entire tree. Normalize to LF
+# in the working directory on all platforms so the formatter sees what the index
+# holds. Go, Inno Setup and YAML are all fine with LF on Windows.
+* text=auto eol=lf
+
+*.exe binary
+*.chonk binary
