@@ -294,18 +294,36 @@ func TestPathOfRootUsesScanRoot(t *testing.T) {
 	}
 }
 
-func TestExplorerArgsKeepSelectInOneArgument(t *testing.T) {
-	const p = `C:\some dir\big file.bin`
+// TestExplorerQuotesOnlyThePath pins the real bug: explorer.exe wants the
+// quotes around the path alone. Go's argument escaping wraps the whole
+// /select,<path> token instead, because it contains a space, and explorer
+// answers that by silently opening Documents. Only the raw command line can
+// express what it wants, so that is what has to be asserted — the argument
+// list is not the layer explorer reads.
+func TestExplorerQuotesOnlyThePath(t *testing.T) {
+	const p = `C:\Users\krist\AppData\Roaming\Microsoft\Teams\Service Worker`
 
-	got := explorerArgs(p, true)
-	if len(got) != 1 || got[0] != `/select,`+p {
-		// Passing /select, and the path as two arguments makes explorer ignore
-		// both and open Documents.
-		t.Errorf("explorerArgs(select) = %#v, want one %q element", got, `/select,`+p)
+	got := explorerCmd(p, true).SysProcAttr.CmdLine
+	if want := `explorer.exe /select,"` + p + `"`; got != want {
+		t.Errorf("command line = %s, want %s", got, want)
+	}
+	if strings.HasPrefix(got, `"`) || strings.Contains(got, `"/select`) {
+		t.Errorf("the switch ended up inside the quotes: %s", got)
+	}
+	// CreateProcess hands the whole line to the child, which discards the first
+	// token as its own name. Without it, /select, would be eaten instead.
+	if !strings.HasPrefix(got, "explorer.exe ") {
+		t.Errorf("command line does not lead with the program name: %s", got)
 	}
 
-	if got := explorerArgs(`C:\some dir`, false); len(got) != 1 || got[0] != `C:\some dir` {
-		t.Errorf("explorerArgs(open) = %#v, want just the path", got)
+	// Opening a folder outright needs no such trick, and must not get one:
+	// Go's escaping handles a plain path correctly, trailing backslash and all.
+	open := explorerCmd(`C:\`, false)
+	if open.SysProcAttr != nil {
+		t.Error("the plain open path should use ordinary argument escaping")
+	}
+	if len(open.Args) != 2 || open.Args[1] != `C:\` {
+		t.Errorf("args = %#v, want the bare path", open.Args)
 	}
 }
 

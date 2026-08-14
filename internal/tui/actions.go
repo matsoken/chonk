@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -14,18 +15,32 @@ import (
 // terminal back.
 type shellDone struct{ err error }
 
-// explorerArgs builds the argument list for showing path in File Explorer.
+// explorerCmd builds the command that shows path in File Explorer. With sel,
+// explorer opens path's *parent* and highlights path inside it — which works
+// for directories just as well as files. Without it, path opens as a folder.
 //
-// With sel, explorer opens path's *parent* and highlights path inside it —
-// which works for directories just as well as files. Without it, explorer opens
-// path itself as a folder. The switch and the path must be a single argument:
-// explorer parses `/select,C:\dir\f.bin` as one token, and passing `/select,`
-// and the path separately opens Documents instead, silently.
-func explorerArgs(path string, sel bool) []string {
+// The /select, form cannot go through the argument list. explorer.exe does not
+// parse its command line the way CommandLineToArgvW does: it wants the quotes
+// around the path alone.
+//
+//	explorer.exe /select,"C:\dir with a space\f.bin"   works
+//	explorer.exe "/select,C:\dir with a space\f.bin"   opens Documents
+//
+// The second is what Go produces, because it escapes each argument as a unit
+// and this one contains a space. Explorer does not report the problem; it just
+// silently opens the default folder. SysProcAttr.CmdLine is the only way to set
+// the line verbatim, and it has to lead with the program name: CreateProcess
+// passes the whole string to the child, which takes the first token to be its
+// own name and skips it. Paths cannot contain a quote character on Windows, so
+// wrapping in quotes needs no escaping of its own.
+func explorerCmd(path string, sel bool) *exec.Cmd {
+	c := exec.Command("explorer.exe", path)
 	if sel {
-		return []string{"/select," + path}
+		c.SysProcAttr = &syscall.SysProcAttr{
+			CmdLine: `explorer.exe /select,"` + path + `"`,
+		}
 	}
-	return []string{path}
+	return c
 }
 
 // explorerTarget picks what `o` shows. Like `!`, it acts on the folder being
@@ -43,7 +58,7 @@ func (m *model) explorerTarget() (path string, sel bool) {
 func (m *model) openExplorer() {
 	path, sel := m.explorerTarget()
 
-	c := exec.Command("explorer.exe", explorerArgs(path, sel)...)
+	c := explorerCmd(path, sel)
 	// Start rather than Run: explorer detaches, and it exits with code 1 even
 	// when it did exactly what was asked. Only a failure to launch is real.
 	if err := c.Start(); err != nil {
