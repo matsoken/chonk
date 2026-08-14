@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/matsoken/chonk/internal/cli"
+	"github.com/matsoken/chonk/internal/clip"
 	"github.com/matsoken/chonk/internal/scan"
 )
 
@@ -80,6 +81,19 @@ type model struct {
 	filter    string
 	filtering bool
 
+	showHelp bool
+	// stale is set once a shell has run: the user may have deleted exactly the
+	// thing they were looking at, and a tree that silently keeps claiming the
+	// space is worse than no tree.
+	stale bool
+	// status is a one-shot footer message, cleared by the next keypress. No
+	// timer, so nothing has to be woken up to expire it.
+	status string
+
+	// copyFn is clip.Write in production, and a recorder in tests that would
+	// otherwise fight over the real clipboard.
+	copyFn func(string) error
+
 	w, h int
 }
 
@@ -94,6 +108,7 @@ func newModel(root string, opts scan.AcquireOptions, dedupe bool) *model {
 		total:   total,
 		used:    used,
 		sortBy:  "size",
+		copyFn:  clip.Write,
 		w:       80,
 		h:       24,
 	}
@@ -110,7 +125,11 @@ type (
 	tick     struct{}
 )
 
-func (m *model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd { return m.acquireCmd() }
+
+// acquireCmd starts a scan. It is also what `r` re-runs, so a rescan reuses the
+// whole existing scanDone path rather than duplicating it.
+func (m *model) acquireCmd() tea.Cmd {
 	handle := make(chan *scan.Tree, 1)
 	o := m.opts
 	o.Scan.Handle = handle
@@ -167,10 +186,36 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuild()
 		return m, nil
 
+	case shellDone:
+		// The shell is gone and the terminal is ours again. Whatever it did to
+		// the disk, the tree in memory does not know about.
+		m.stale = true
+		if launchFailed(msg.err) {
+			m.status = "shell: " + msg.err.Error()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m, m.onKey(msg)
 	}
 	return m, nil
+}
+
+// rescan throws away the current tree and walks again. Every entry index is
+// invalidated by a new tree, so this lands back at the root rather than trying
+// to re-find where the cursor was.
+func (m *model) rescan() tea.Cmd {
+	m.phase = phaseScanning
+	m.tree, m.idx, m.live = nil, nil, nil
+	m.dir, m.cursor, m.offset, m.trail = 0, 0, 0, nil
+	m.rows = nil
+	m.stale, m.status = false, ""
+	m.started = time.Now()
+	// m.opts goes through untouched — deliberately not forcing Refresh. The USN
+	// delta path in scan.Acquire exists for exactly this case: it reads the
+	// journal forward and patches the cached tree, so the cleanup you just did
+	// shows up almost instantly instead of costing a second full walk.
+	return m.acquireCmd()
 }
 
 func (m *model) onKey(k tea.KeyMsg) tea.Cmd {
@@ -194,6 +239,20 @@ func (m *model) onKey(k tea.KeyMsg) tea.Cmd {
 				m.filter += string(k.Runes)
 				m.rebuild()
 			}
+		}
+		return nil
+	}
+
+	// A status message lives until the next keypress. Clearing it here, before
+	// the action that may set a new one, is the whole expiry mechanism.
+	m.status = ""
+
+	// The help overlay is modal: any key dismisses it and does nothing else, so
+	// nobody reads the list, presses a key to try it, and has it act twice.
+	if m.showHelp {
+		m.showHelp = false
+		if s := k.String(); s == "q" || s == "ctrl+c" {
+			return tea.Quit
 		}
 		return nil
 	}
@@ -243,8 +302,48 @@ func (m *model) onKey(k tea.KeyMsg) tea.Cmd {
 		m.rebuild()
 	case "/":
 		m.filtering = true
+	case "?":
+		m.showHelp = true
+
+	// Handoff. chonk stays read-only; these pass the path to something that
+	// can actually do the cleanup. Both act on the folder being browsed, not
+	// on the highlighted row — descend first to act inside a directory.
+	case "o":
+		m.openExplorer()
+	case "!":
+		return m.shellHere(m.pathOf(m.dir))
+	case "c", "y":
+		if i, ok := m.selected(); ok {
+			m.copyPath(m.pathOf(i))
+		}
+	case "C":
+		m.copyPath(m.pathOf(m.dir))
+	case "r":
+		return m.rescan()
 	}
 	return nil
+}
+
+// selected reports the entry under the cursor. There is none when a filter
+// matches nothing.
+func (m *model) selected() (uint32, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.rows) {
+		return 0, false
+	}
+	return m.rows[m.cursor], true
+}
+
+// pathOf returns an entry's full path.
+//
+// Entry 0 needs the special case: the root's stored name has its trailing
+// separator trimmed at scan time, so a `C:\` scan gives Path(0) == "C:" — which
+// names the current directory on drive C:, not the drive root. Handing that to
+// Explorer or a shell sends you somewhere arbitrary.
+func (m *model) pathOf(i uint32) string {
+	if i == 0 {
+		return m.root
+	}
+	return m.tree.Path(i)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +484,11 @@ func (m *model) View() string {
 			stWarn.Render("scan failed"), m.err.Error())
 	case phaseScanning:
 		return m.scanView()
+	case phaseBrowse:
+		if m.showHelp {
+			return m.helpView()
+		}
+		return m.browseView()
 	default:
 		return m.browseView()
 	}
@@ -408,11 +512,23 @@ func (m *model) browseView() string {
 	var b strings.Builder
 
 	// Header: where we are, and what it holds.
-	path := m.root
-	if m.dir != 0 {
-		path = m.tree.Path(m.dir)
+	path := m.pathOf(m.dir)
+	// After a shell has run, say so: the sizes below may be describing files
+	// that no longer exist. The marker is styled, so its plain width has to be
+	// budgeted by hand — and it shortens, then disappears, rather than crowding
+	// the path down to nothing. truncLeft gives up below two columns and
+	// returns the path whole, which would overflow the line.
+	avail, mark := m.w-2, ""
+	if m.stale {
+		for _, s := range []string{"stale · r rescans", "stale"} {
+			if avail-(len(s)+2) >= 10 {
+				avail -= len(s) + 2
+				mark = "  " + stWarn.Render(s)
+				break
+			}
+		}
 	}
-	b.WriteString(" " + stHeader.Render(truncLeft(path, m.w-2)) + "\n")
+	b.WriteString(" " + stHeader.Render(truncLeft(path, max(1, avail))) + mark + "\n")
 
 	label := "logical"
 	if m.sortBy == "alloc" {
@@ -446,23 +562,24 @@ func (m *model) browseView() string {
 
 	// Footer: filter prompt or key hints.
 	b.WriteString(stDim.Render(strings.Repeat("─", max(1, m.w))) + "\n")
-	if m.filtering || m.filter != "" {
-		cur := ""
-		if m.filtering {
-			cur = "█"
-		}
-		b.WriteString(fmt.Sprintf(" %s %s%s   %s",
-			stKey.Render("filter:"), m.filter, cur,
+	switch {
+	case m.filtering:
+		b.WriteString(fmt.Sprintf(" %s %s█   %s",
+			stKey.Render("filter:"), m.filter,
 			stDim.Render("esc clears · enter accepts")))
-	} else {
-		b.WriteString(" " + stDim.Render(strings.Join([]string{
-			stKey.Render("↑↓") + " move",
-			stKey.Render("⏎") + " open",
-			stKey.Render("⌫") + " up",
-			stKey.Render("s") + " sort:" + m.sortBy,
-			stKey.Render("/") + " filter",
-			stKey.Render("q") + " quit",
-		}, stDim.Render(" · "))))
+
+	case m.status != "":
+		// Truncate before styling: slicing a rendered string would cut an ANSI
+		// escape in half and leave the terminal colored.
+		b.WriteString(" " + stKey.Render(truncLeft(m.status, max(1, m.w-2))))
+
+	case m.filter != "":
+		b.WriteString(fmt.Sprintf(" %s %s   %s",
+			stKey.Render("filter:"), m.filter,
+			stDim.Render("esc clears · enter accepts")))
+
+	default:
+		b.WriteString(m.footerHints())
 	}
 	return b.String()
 }

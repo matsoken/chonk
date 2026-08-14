@@ -13,7 +13,11 @@ and USB sticks, good-looking terminal output.
 ## Non-goals
 
 - Treemap visualization. That needs a real GUI; out of scope.
-- Deleting or moving files. Read-only tool. Reporting only.
+- Deleting or moving files. Read-only tool. Reporting only. The TUI's `o`, `!`
+  and `c` keys are not a softening of this: they hand a path to File Explorer,
+  a child shell, or the clipboard, and the user does the deleting somewhere
+  else. chonk still writes nothing but its own cache. `os/exec` in
+  `internal/tui/actions.go` is that handoff, not a retreat from the invariant.
 - Cross-platform. `//go:build windows` throughout. `gdu` already covers Linux.
 
 ## Settled decisions

@@ -117,8 +117,43 @@ layout changed between builds.
 -quiet            suppress the live progress line
 ```
 
-TUI keys: arrows or `hjkl` to move and descend, backspace to go up, `s` to cycle
-sort, `/` to filter, `q` to quit.
+## TUI keys
+
+`?` shows this list in the app.
+
+```
+↑ ↓ · k j     move                   o        show this folder in Explorer
+pgup pgdn     move a page            !        shell in this folder
+g · G         first · last row       c · y    copy the selected path
+⏎ · → · l     open directory         C        copy this directory's path
+⌫ · ← · h     go back up             r        rescan
+s             cycle sort             /        filter (esc clears)
+q             quit                   ?        key list
+```
+
+chonk never deletes anything — see the non-goals in `plan.md`. `o`, `!` and `c`
+exist so it can hand a path to something that does.
+
+`o` and `!` both act on the folder named in the header, not on the highlighted
+row; press `⏎` first to act inside a directory. `o` does highlight the row you
+were on inside that folder, which is free — Explorer's `/select,` opens an
+item's parent, and that parent is the folder `!` would drop you into. `c` and
+`C` are where the row and the folder are addressed separately.
+
+`!` runs a shell with its working directory set to the folder you are browsing;
+typing `exit` returns to chonk, which then marks the tree **stale**, because the
+sizes on screen may be describing files you just removed. `r` rescans, and on a
+volume with a working USN journal that is close to instant — it patches the
+cached tree from the journal rather than walking again. A rescan starts back at
+the root, since a fresh tree invalidates every entry index.
+
+The shell is `cmd` by default. Set `CHONK_SHELL` to an executable — for example
+`pwsh.exe` — to use another one. It names a program, not a command line, so
+arguments in that variable are not parsed.
+
+Note that no program can change the working directory of the shell it was
+launched from, chonk included. `!` gives you a child shell in that folder; when
+you quit chonk you are back where you started.
 
 ## How it works
 
